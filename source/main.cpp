@@ -1,5 +1,9 @@
 #include <grrlib.h>
 #include <iostream>
+#include <time.h>
+#include <deque>
+#include <math.h>
+#include <fstream>
 #include <wiiuse/wpad.h>
 #include "BMfont3_png.h"
 // #include "alien_png.h"
@@ -11,10 +15,16 @@
 #define RED 0xFF0000FF
 #define BLUE 0x0000FFFF
 
-const int SCREEN_WIDTH = 640;
-const int SCREEN_HEIGHT = 480;
+const int CELL_SIZE = 20;
+const int CELL_COUNT = 24;
+
+const int SCREEN_WIDTH = CELL_SIZE * CELL_COUNT;
+const int SCREEN_HEIGHT = CELL_SIZE * CELL_COUNT;
 
 bool isGamePaused;
+
+int score;
+int highScore;
 
 typedef struct
 {
@@ -25,15 +35,167 @@ typedef struct
     unsigned int color;
 } Rectangle;
 
-Rectangle player = {SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, 64, 64, WHITE};
-Rectangle ball = {SCREEN_WIDTH / 2 + 100, SCREEN_HEIGHT / 2 - 32, 32, 32, WHITE};
+typedef struct
+{
+    int x;
+    int y;
+} Vector2;
 
-const int PLAYER_SPEED = 10;
+typedef struct
+{
+    int cellCount;
+    int cellSize;
+    std::deque<Vector2> body;
+    Vector2 direction;
+    bool shouldAddSegment;
+} Snake;
 
-int ballVelocityX = 4;
-int ballVelocityY = 4;
+Snake snake;
 
-int score;
+typedef struct
+{
+    int cellCount;
+    int cellSize;
+    Vector2 position;
+    bool isDestroyed;
+} Food;
+
+Food food;
+
+int rand_range(int min, int max)
+{
+    return min + rand() / (RAND_MAX / (max - min + 1) + 1);
+}
+
+Vector2 generateRandomPosition()
+{
+    int positionX = rand_range(0, CELL_COUNT - 1);
+    int positionY = rand_range(0, CELL_COUNT - 1);
+
+    return Vector2{positionX, positionY};
+}
+
+Vector2 vector2Add(Vector2 vector1, Vector2 vector2)
+{
+    Vector2 result = {vector1.x + vector2.x, vector1.y + vector2.y};
+
+    return result;
+}
+
+int vector2Equals(Vector2 vector1, Vector2 vector2)
+{
+    const float EPSILON = 0.000001f;
+    int result = ((fabsf(vector1.x - vector2.x)) <= (EPSILON * fmaxf(1.0f, fmaxf(fabsf(vector1.x), fabsf(vector2.x))))) &&
+                 ((fabsf(vector1.y - vector2.y)) <= (EPSILON * fmaxf(1.0f, fmaxf(fabsf(vector1.y), fabsf(vector2.y)))));
+
+    return result;
+}
+
+double lastUpdateTime = 0;
+
+bool eventTriggered(int counter)
+{
+    lastUpdateTime += counter;
+
+    if (lastUpdateTime >= 70)
+    {
+        lastUpdateTime = 0;
+
+        return true;
+    }
+
+    return false;
+}
+
+void saveScore()
+{
+    std::string path = "high-score.txt";
+
+    std::ofstream highScores(path);
+
+    std::string scoreString = std::to_string(score);
+    highScores << scoreString;
+
+    highScores.close();
+}
+
+int loadHighScore()
+{
+    std::string highScoreText;
+
+    std::string path = "high-score.txt";
+
+    std::ifstream highScores(path);
+
+    if (!highScores.is_open())
+    {
+        saveScore();
+
+        std::ifstream auxHighScores(path);
+
+        getline(auxHighScores, highScoreText);
+
+        highScores.close();
+
+        int highScore = stoi(highScoreText);
+
+        return highScore;
+    }
+
+    getline(highScores, highScoreText);
+
+    highScores.close();
+
+    int highScore = stoi(highScoreText);
+
+    return highScore;
+}
+
+void resetSnakePosition()
+{
+    // highScore = loadHighScore();
+
+    if (score > highScore)
+    {
+        highScore = score;
+        saveScore();
+    }
+
+    snake.body = {{6, 9}, {5, 9}, {4, 9}};
+    snake.direction = {1, 0};
+
+    score = 0;
+}
+
+bool checkCollisionWithFood(Vector2 foodPosition)
+{
+    if (vector2Equals(snake.body[0], foodPosition))
+    {
+        snake.shouldAddSegment = true;
+        return true;
+    }
+
+    return false;
+}
+
+void checkCollisionWithEdges()
+{
+    if (snake.body[0].x == CELL_COUNT || snake.body[0].x == -1 || snake.body[0].y == CELL_COUNT || snake.body[0].y == -1)
+    {
+        resetSnakePosition();
+    }
+}
+
+void checkCollisionBetweenHeadAndBody()
+{
+    for (size_t i = 1; i < snake.body.size(); i++)
+    {
+        if (vector2Equals(snake.body[0], snake.body[i]))
+        {
+            resetSnakePosition();
+        }
+    }
+}
 
 bool hasCollision(Rectangle &bounds, Rectangle &ball)
 {
@@ -41,128 +203,137 @@ bool hasCollision(Rectangle &bounds, Rectangle &ball)
            bounds.y < ball.y + ball.h && bounds.y + bounds.h > ball.y;
 }
 
-void update()
+int counter = 0;
+
+void update(int keyDown)
 {
-    int padHeld = WPAD_ButtonsHeld(0);
+    counter++;
 
-    if (padHeld & WPAD_BUTTON_LEFT && player.x > 0)
+    if (eventTriggered(counter))
     {
-        player.x -= PLAYER_SPEED;
+        counter = 0;
+        if (!snake.shouldAddSegment)
+        {
+            snake.body.pop_back();
+            snake.body.push_front(vector2Add(snake.body[0], snake.direction));
+        }
+        else
+        {
+            snake.body.push_front(vector2Add(snake.body[0], snake.direction));
+            snake.shouldAddSegment = false;
+        }
     }
 
-    else if (padHeld & WPAD_BUTTON_RIGHT && player.x < SCREEN_WIDTH - player.w)
+    if (keyDown & WPAD_BUTTON_UP && snake.direction.y != 1)
     {
-        player.x += PLAYER_SPEED;
+        snake.direction = {0, -1};
     }
 
-    else if (padHeld & WPAD_BUTTON_UP && player.y > 0)
+    else if (keyDown & WPAD_BUTTON_DOWN && snake.direction.y != -1)
     {
-        player.y -= PLAYER_SPEED;
+        snake.direction = {0, 1};
     }
 
-    else if (padHeld & WPAD_BUTTON_DOWN && player.y < SCREEN_HEIGHT - player.h)
+    else if (keyDown & WPAD_BUTTON_LEFT && snake.direction.x != 1)
     {
-        player.y += PLAYER_SPEED;
+        snake.direction = {-1, 0};
     }
 
-    if (ball.x < 0 || ball.x > SCREEN_WIDTH - ball.w)
-	{
-		ballVelocityX *= -1;
+    else if (keyDown & WPAD_BUTTON_RIGHT && snake.direction.x != -1)
+    {
+        snake.direction = {1, 0};
+    }
 
-		ball.color = GREEN;
-	}
+    checkCollisionWithEdges();
+    checkCollisionBetweenHeadAndBody();
 
-	else if (ball.y < 0 || ball.y > SCREEN_HEIGHT - ball.h)
-	{
-		ballVelocityY *= -1;
+    food.isDestroyed = checkCollisionWithFood(food.position);
 
-		ball.color = RED;
-	}
-
-	else if (hasCollision(player, ball))
-	{
-		ballVelocityX *= -1;
-		ballVelocityY *= -1;
-
-		ball.color = BLUE;
-
-		score++;
-	}
-
-	ball.x += ballVelocityX;
-	ball.y += ballVelocityY;
+    if (food.isDestroyed)
+    {
+        food.position = generateRandomPosition();
+        score++;
+    }
 }
 
 int main(int argc, char **argv)
 {
-    // Initialise the Graphics & Video subsystem
     GRRLIB_Init();
 
-    // loading images png
-    // It fails, but I don't know why
-    // GRRLIB_texImg *alien = GRRLIB_LoadTexturePNG(alien_png);
-
-    // loading fonts
     GRRLIB_texImg *blueFonts = GRRLIB_LoadTexture(BMfont3_png);
 
-    // To indicate the font region to load.
     GRRLIB_InitTileSet(blueFonts, 32, 32, 32);
 
-    // Initialise the Wiimotes
+    // highScore = loadHighScore();
+
+    srand(time(NULL));
+
+    Vector2 initialFoodPosition = generateRandomPosition();
+
+    food = {CELL_COUNT, CELL_SIZE, initialFoodPosition, false};
+
+    std::deque<Vector2> initialBody = {{6, 9}, {5, 9}, {4, 9}};
+    Vector2 direction = {1, 0};
+
+    snake = {CELL_COUNT, CELL_SIZE, initialBody, direction, false};
+
     WPAD_Init();
 
-    // Loop forever
     while (true)
     {
         WPAD_SetVRes(0, SCREEN_WIDTH, SCREEN_HEIGHT);
-        WPAD_ScanPads(); // Scan the Wiimotes
+        WPAD_ScanPads();
 
         int padDown = WPAD_ButtonsDown(0);
 
-        // If HOME was pressed on the first Wiimote, break out of the loop
-        if (padDown & WPAD_BUTTON_HOME)
-        {
-            break;
-        }
-
-        if (padDown & WPAD_BUTTON_A)
+        if (padDown & WPAD_BUTTON_PLUS)
         {
             isGamePaused = !isGamePaused;
         }
 
         if (!isGamePaused)
         {
-            update();
+            update(padDown);
         }
 
-        GRRLIB_FillScreen(BLACK); // Clear the screen
+        GRRLIB_FillScreen(BLACK);
 
-        // ---------------------------------------------------------------------
-        // Place your drawing code below
-        // ---------------------------------------------------------------------
+        for (size_t i = 0; i < snake.body.size(); i++)
+        {
+            int positionX = snake.body[i].x;
+            int positionY = snake.body[i].y;
 
-        // Draw a img
-        // GRRLIB_DrawImg(10, 50, alien, 0, 1, 1, WHITE);
+            Rectangle bodyBounds = {(float)positionX * CELL_SIZE, (float)positionY * CELL_SIZE, CELL_SIZE, CELL_SIZE, WHITE};
 
-        GRRLIB_Rectangle(player.x, player.y, player.w, player.h, player.color, 1);
-        GRRLIB_Rectangle(ball.x, ball.y, ball.w, ball.h, ball.color, 1);
+            GRRLIB_Rectangle(bodyBounds.x, bodyBounds.y, bodyBounds.w, bodyBounds.h, bodyBounds.color, 1);
+        }
 
-        // displaying text with the loaded fonts.
+        //(float) to avoid warning of conversion.
+        Rectangle foodBounds = {(float)food.position.x * CELL_SIZE, (float)food.position.y * CELL_SIZE, CELL_SIZE, CELL_SIZE, WHITE};
+
+        GRRLIB_Rectangle(foodBounds.x, foodBounds.y, foodBounds.w, foodBounds.h, foodBounds.color, 1);
+
+        GRRLIB_Line(0, 1, SCREEN_WIDTH, 1, WHITE);
+        GRRLIB_Line(0, SCREEN_HEIGHT - 1, SCREEN_WIDTH, SCREEN_HEIGHT - 1, WHITE);
+        GRRLIB_Line(0, 0, 0, SCREEN_HEIGHT, WHITE);
+        GRRLIB_Line(SCREEN_WIDTH - 1, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT, WHITE);
+
         if (isGamePaused)
         {
-            // Any text has to be written in uppercase if not it doesn't work.
-            GRRLIB_Printf(150, 100, blueFonts, WHITE, 1, "GAME PAUSED");
+            GRRLIB_Printf(60, 100, blueFonts, WHITE, 1, "GAME PAUSED");
         }
 
-        std::string scoreString = "SCORE: " + std::to_string(score);
+        std::string highScoreString = "HIGH:" + std::to_string(highScore);
+        GRRLIB_Printf(10, 20, blueFonts, WHITE, 1, highScoreString.c_str());
 
-        GRRLIB_Printf(185, 20, blueFonts, WHITE, 1, scoreString.c_str());
+        std::string scoreString = "SCORE:" + std::to_string(score);
+        GRRLIB_Printf(250, 20, blueFonts, WHITE, 1, scoreString.c_str());
 
-        GRRLIB_Render(); // Render the frame buffer to the TV
+        GRRLIB_Render();
     }
 
-    GRRLIB_FreeTexture(blueFonts); // Be a good boy, clear the memory allocated by GRRLIB
+    GRRLIB_FreeTexture(blueFonts); 
 
     GRRLIB_Exit();
-    exit(0); // Use exit() to exit a program, do not use 'return' from main()
+    exit(0); 
 }
